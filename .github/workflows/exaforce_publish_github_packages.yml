@@ -1,0 +1,70 @@
+name: "Publish to GitHub Packages"
+
+on:
+  push:
+    branches:
+      - 1.57.0-exaforce
+  workflow_dispatch:
+
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+jobs:
+  publish-to-github-packages:
+    name: "Build and Publish to GitHub Packages"
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: 'https://npm.pkg.github.com'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Scope packages for GitHub Packages
+        run: |
+          # Get the repository owner (lowercase required for GitHub Packages)
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
+          # Update each public package to use the scoped name
+          node ./utils/workspace.js --list-public-package-paths | while read package_path
+          do
+            if [ -f "${package_path}/package.json" ]; then
+              # Get the current package name
+              PKG_NAME=$(node -e "console.log(require('${package_path}/package.json').name)")
+
+              # Create scoped name (remove any existing scope first)
+              BASE_NAME=$(echo "$PKG_NAME" | sed 's/@[^/]*\///')
+              SCOPED_NAME="@${OWNER}/${BASE_NAME}"
+
+              # Update package.json with scoped name and registry
+              node -e "
+                const fs = require('fs');
+                const pkg = require('${package_path}/package.json');
+                pkg.name = '${SCOPED_NAME}';
+                pkg.publishConfig = { registry: 'https://npm.pkg.github.com' };
+                pkg.repository = { type: 'git', url: 'https://github.com/${{ github.repository }}.git' };
+                fs.writeFileSync('${package_path}/package.json', JSON.stringify(pkg, null, 2) + '\n');
+              "
+              echo "Scoped ${PKG_NAME} -> ${SCOPED_NAME}"
+            fi
+          done
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node ./utils/workspace.js --list-public-package-paths | while read package_path
+          do
+            echo "Publishing ${package_path}..."
+            npm publish "${package_path}" --access=public --tag=latest || echo "Failed to publish ${package_path}, continuing..."
+          done
